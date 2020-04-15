@@ -50,7 +50,7 @@ let classify buf =
   | ' ' | '\t' | '\r' | '\n' -> `Space
   | c -> error_loc buf.loc "unexpected symbol '%c'" c
 
-let keywords = ["let"; "fun"; "in"]
+let keywords = ["let"; "fun"; "in"; "true"; "false"]
 
 let lex buf =
   let rec chunk classes accum buf f =
@@ -72,7 +72,7 @@ let lex buf =
 
 (* Parser *)
 type parsenode =
-| PLit of [ `Int of int ]
+| PLit of [ `Int of int | `Bool of bool ]
 | PVar of string
 | PFun of string * parsetree
 | PApp of parsetree * parsetree
@@ -82,6 +82,7 @@ and parsetree = { loc: loc; desc: parsenode }
 let rec show_parsetree parsetree =
   match parsetree.desc with
   | PLit (`Int n) -> string_of_int n
+  | PLit (`Bool b) -> string_of_bool b
   | PVar var -> var
   | PFun (arg, body) -> Printf.sprintf "(fun %s -> %s)" arg (show_parsetree body)
   | PApp (func, arg) -> Printf.sprintf "(%s %s)" (show_parsetree func) (show_parsetree arg) ^ ")"
@@ -100,6 +101,10 @@ let parse =
     match tokens with
     | (loc, LInt n) :: tokens ->
       tokens |> f (make ~loc (PLit (`Int n)))
+    | (loc, LKw "true") :: tokens ->
+      tokens |> f (make ~loc (PLit (`Bool true)))
+    | (loc, LKw "false") :: tokens ->
+      tokens |> f (make ~loc (PLit (`Bool false)))
     | (loc, LId var) :: tokens ->
       tokens |> f (make ~loc (PVar var))
     | (loc, LKw "fun") :: (_, LId arg) :: (_, LKw "->") :: tokens ->
@@ -152,6 +157,7 @@ let parse =
 (* Types *)
 type typ =
 | YInt
+| YBool
 | YFun  of typ * typ
 | YVar  of tvar
 | YPoly of tvar * typ
@@ -177,6 +183,7 @@ let rec show_type names typ =
   let show_tvar, show_type = show_tvar names, show_type names in
   match find_type typ with
   | YInt -> "int"
+  | YBool -> "bool"
   | YFun (a, r) ->
     (match find_type a with
     | YFun (a', r') -> "(" ^ (show_type a') ^ " -> " ^ (show_type r') ^ ")"
@@ -205,6 +212,7 @@ let generalize outer typ =
     | YVar tv when List.memq tv accum -> accum
     | YVar tv -> tv :: accum
     | YInt -> accum
+    | YBool -> accum
     | YFun (a, r) -> collect (collect accum a) r
     | YPoly _ -> assert false
   in List.fold_left (fun typ tv -> YPoly (tv, typ)) typ (collect [] typ)
@@ -216,12 +224,13 @@ let instantiate typ =
     | YVar _ -> typ
     | YPoly (tv, typ) -> subst ((tv, fresh_type ()) :: assoc) typ
     | YInt -> YInt
+    | YBool -> YBool
     | YFun (a, r) -> YFun (subst assoc a, subst assoc r)
   in subst [] typ
 
 (* Type checker *)
 type typednode =
-| TLit of [ `Int of int ]
+| TLit of [ `Int of int | `Bool of bool ]
 | TVar of string
 | TFun of string * typedtree
 | TApp of typedtree * typedtree
@@ -232,6 +241,7 @@ let rec show_typedtree names typedtree =
   let show_type, show_typedtree = show_type names, show_typedtree names in
   match typedtree with
   | { desc = TLit (`Int n) } -> string_of_int n
+  | { desc = TLit (`Bool n) } -> string_of_bool n
   | { desc = TVar var } -> var
   | { desc = TFun (arg, body); typ } ->
     Printf.sprintf "(fun{%s} %s -> %s)" (show_type typ) arg (show_typedtree body)
@@ -247,7 +257,9 @@ let rec typeck tenv (pexpr:parsetree) =
   let make ~loc desc typ = { loc; typ; desc } in
   match pexpr with
   | { loc; desc = PLit value } ->
-    make ~loc (TLit value) (match value with `Int _ -> YInt)
+    make ~loc (TLit value) (match value with
+    | `Int _ -> YInt
+    | `Bool b -> YBool)
   | { loc; desc = PVar var } ->
     (match Hashtbl.find_opt tenv var with
     | Some typ -> make ~loc (TVar var) (instantiate typ)
@@ -272,12 +284,14 @@ let rec typeck tenv (pexpr:parsetree) =
 (* Interpreter *)
 type value =
 | VInt  of int
+| VBool of bool
 | VFun  of (string, value) Hashtbl.t * string * typedtree
 | VPrim of (value -> value)
 
 let show_value value =
   match value with
   | VInt value -> Printf.sprintf "%d" value
+  | VBool value -> Printf.sprintf "%s" (string_of_bool value)
   | VFun (env, arg, tbody) ->
     Printf.sprintf "<fun %s -> %s>" arg (with_names show_typedtree tbody)
   | VPrim _ -> "<prim>"
@@ -288,6 +302,7 @@ let lift2 f = VPrim (fun x -> (VPrim (fun y -> f x y)))
 let rec interp venv texpr =
   match texpr.desc with
   | TLit (`Int value) -> VInt value
+  | TLit (`Bool value) -> VBool value
   | TVar var -> Hashtbl.find venv var
   | TFun (arg, tbody) -> VFun (Hashtbl.copy venv, arg, tbody)
   | TApp (tfunc, targ) ->
