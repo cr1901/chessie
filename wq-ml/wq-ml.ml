@@ -50,7 +50,7 @@ let classify buf =
   | ' ' | '\t' | '\r' | '\n' -> `Space
   | c -> error_loc buf.loc "unexpected symbol '%c'" c
 
-let keywords = ["let"; "fun"; "in"; "true"; "false"]
+let keywords = ["let"; "fun"; "in"; "true"; "false"; "if"; "then"; "else"]
 
 let lex buf =
   let rec chunk classes accum buf f =
@@ -77,6 +77,7 @@ type parsenode =
 | PFun of string * parsetree
 | PApp of parsetree * parsetree
 | PLet of string * parsetree * parsetree
+| PIf  of parsetree * parsetree * parsetree
 and parsetree = { loc: loc; desc: parsenode }
 
 let rec show_parsetree parsetree =
@@ -88,6 +89,8 @@ let rec show_parsetree parsetree =
   | PApp (func, arg) -> Printf.sprintf "(%s %s)" (show_parsetree func) (show_parsetree arg) ^ ")"
   | PLet (var, expr, body) ->
     Printf.sprintf "(let %s = %s in %s)" var (show_parsetree expr) (show_parsetree body)
+  | PIf (pred, con, alt) ->
+    Printf.sprintf "(if %s then %s else %s)" (show_parsetree pred) (show_parsetree con) (show_parsetree alt)
 
 let parse =
   let make ~loc desc = { loc; desc } in
@@ -119,6 +122,16 @@ let parse =
         | _ -> tokens |> expected_token (LKw "in"))
     | (_, LKw "let") :: (_, LId var) :: tokens -> tokens |> expected_token (LKw "=")
     | (_, LKw "let") :: tokens -> tokens |> expected "identifier"
+    | (_, LKw "if") :: tokens ->
+      tokens |> expr_lowest (fun pred tokens ->
+        match tokens with
+        | (loc, LKw "then") :: tokens ->
+          tokens |> expr_lowest (fun consq tokens ->
+            match tokens with
+              | (loc, LKw "else") :: tokens ->
+                tokens |> expr_lowest (fun alt -> f (make ~loc (PIf (pred, consq, alt))))
+              | _ -> tokens |> expected_token (LKw "else"))
+        | _ -> tokens |> expected_token (LKw "then"))
     | (_, LKw "(") :: tokens ->
       tokens |> expr_lowest (fun expr tokens ->
         match tokens with
@@ -199,6 +212,7 @@ let unify loc ua ub =
     | YVar va, _ -> va.link <- tb
     | _, YVar _ -> unify_one tb ta
     | YInt, YInt -> ()
+    | YBool, YBool -> ()
     | YFun (aa, ar), YFun (ba, br) -> unify_one aa ba; unify_one ar br
     | _ -> with_names (fun names ->
         error_loc loc "cannot unify %s with %s" (show_type names ua) (show_type names ub))
@@ -235,6 +249,7 @@ type typednode =
 | TFun of string * typedtree
 | TApp of typedtree * typedtree
 | TLet of string * typedtree * typedtree
+| TIf of typedtree * typedtree * typedtree
 and typedtree = { loc: loc; typ: typ; desc: typednode }
 
 let rec show_typedtree names typedtree =
@@ -251,6 +266,9 @@ let rec show_typedtree names typedtree =
   | { desc = TLet (var, expr, body) } ->
     Printf.sprintf "(let %s = %s{%s} in %s{%s})" var (show_typedtree expr) (show_type expr.typ)
       (show_typedtree body) (show_type body.typ)
+  | { desc = TIf (pred, consq, alt) } ->
+    Printf.sprintf "(if %s then %s{%s} else %s{%s)" (show_typedtree pred) (show_typedtree consq)
+      (show_type consq.typ) (show_typedtree alt) (show_type alt.typ)
 
 let rec typeck tenv (pexpr:parsetree) =
   let typeck = typeck tenv in
@@ -280,6 +298,13 @@ let rec typeck tenv (pexpr:parsetree) =
     bind tenv var (generalize outer tvalue.typ) (fun var_typ ->
       let tbody = typeck pbody in
       make ~loc (TLet (var, tvalue, tbody)) tbody.typ)
+  | { loc; desc = PIf (pred, consq, alt) } ->
+    let tpred = typeck pred in
+    let tconsq = typeck consq in
+    let talt = typeck alt in
+    unify loc tpred.typ YBool;
+    unify loc tconsq.typ talt.typ;
+    make ~loc (TIf (tpred, tconsq, talt)) tconsq.typ
 
 (* Interpreter *)
 type value =
@@ -315,6 +340,11 @@ let rec interp venv texpr =
   | TLet (var, texpr, tbody) ->
     bind venv var (interp venv texpr) (fun vexpr ->
       interp venv tbody)
+  | TIf (pred, consq, alt) ->
+    (match interp venv pred with
+    | VBool true -> interp venv consq
+    | VBool false -> interp venv alt
+    | _ -> assert false) (* Already typechecked that the predicate is bool. *)
 
 (* Builtins *)
 let builtins =
